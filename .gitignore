@@ -1,0 +1,32 @@
+## Swift / SwiftPM
+.build/
+.swiftpm/
+Package.resolved
+
+## Xcode
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+*.xcuserstate
+
+## macOS
+.DS_Store
+
+## Build output — never commit built artifacts.
+build/
+*.app
+*.icns
+Resources/AppIcon.iconset/
+
+## Secrets — never commit
+*.p12
+*.cer
+*.mobileprovision
+secrets/
+*.env
+## OAuth client exports (the installed-app JSON from Google Console)
+client_secret*.json
+*oauth*client*.json
+
+## Internal development steering (not part of the public project)
+.kiro/

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2E6BE6"/>
+      <stop offset="1" stop-color="#1B3A8C"/>
+    </linearGradient>
+    <linearGradient id="shield" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#DCE6FF"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded app background -->
+  <rect x="0" y="0" width="1024" height="1024" rx="228" ry="228" fill="url(#bg)"/>
+
+  <!-- Shield -->
+  <path d="M512 196
+           L760 300
+           L760 520
+           C760 672 648 788 512 836
+           C376 788 264 672 264 520
+           L264 300 Z"
+        fill="url(#shield)"/>
+
+  <!-- Keyhole / gate: a stylized lock representing IAP access -->
+  <g fill="#2E6BE6">
+    <circle cx="512" cy="470" r="70"/>
+    <rect x="486" y="470" width="52" height="150" rx="20"/>
+  </g>
+
+  <!-- Gate bars suggesting "gate" -->
+  <g stroke="#2E6BE6" stroke-width="26" stroke-linecap="round" opacity="0.35">
+    <line x1="400" y1="360" x2="400" y2="640"/>
+    <line x1="624" y1="360" x2="624" y2="640"/>
+  </g>
+</svg>
