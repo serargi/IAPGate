@@ -65,8 +65,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
-        Transport.PTYSession.terminateAll()
+    /// Defer quitting until every SSH/tunnel process has really exited.
+    /// Doing the cleanup in applicationWillTerminate is too late: the
+    /// app dies before the processes are killed and the remote ssh
+    /// session is left idle on the server.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard Transport.PTYSession.hasLiveSessions else { return .terminateNow }
+        DispatchQueue.global(qos: .userInitiated).async {
+            Transport.PTYSession.terminateAllBlocking()
+            DispatchQueue.main.async {
+                NSApp.reply(toApplicationShouldTerminate: true)
+            }
+        }
+        return .terminateLater
     }
 }
 

@@ -82,7 +82,18 @@ public final class PTYSession: @unchecked Sendable {
         // AND creates a new process group. We then signal the whole
         // group on terminate() so gcloud's child ssh/tunnel processes
         // are killed too — no orphaned remote sessions.
-        let flags = Int16(POSIX_SPAWN_SETSID)
+        //
+        // Also reset signal dispositions and the signal mask in the
+        // child. posix_spawn otherwise inherits ignored signals from the
+        // parent, and a child that inherited SIG_IGN for SIGHUP/SIGTERM
+        // cannot be shut down gracefully (only by SIGKILL).
+        var defaultSignals = sigset_t()
+        sigfillset(&defaultSignals)
+        posix_spawnattr_setsigdefault(&attr, &defaultSignals)
+        var emptyMask = sigset_t()
+        sigemptyset(&emptyMask)
+        posix_spawnattr_setsigmask(&attr, &emptyMask)
+        let flags = Int16(POSIX_SPAWN_SETSID | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK)
         posix_spawnattr_setflags(&attr, flags)
 
         let argv = ([executable] + arguments).map { strdup($0) } + [nil]
@@ -133,26 +144,96 @@ public final class PTYSession: @unchecked Sendable {
     /// first (ssh treats it as a hangup and tears down the session),
     /// then SIGKILL as a backstop for anything still alive.
     public func terminate() {
+        guard let target = beginShutdown() else { return }
+
+        // Give the remote side a moment to act on the logout, then
+        // tear everything down locally.
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            self?.closeMaster()
+            Self.signalGroup(target, SIGHUP, SIGTERM)
+
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2.0) {
+                Self.signalGroup(target, SIGKILL)
+            }
+        }
+    }
+
+    /// True while at least one PTY child process is still running.
+    public static var hasLiveSessions: Bool {
+        registryLock.lock(); defer { registryLock.unlock() }
+        return live.contains { $0.s?.isRunning == true }
+    }
+
+    /// Terminates every live session and BLOCKS until the processes are
+    /// gone (or `timeout` elapses, after which they are SIGKILLed).
+    ///
+    /// The asynchronous `terminate()` is not enough on app quit: the
+    /// process exits before its delayed kill ever runs, leaving the
+    /// remote ssh session idle on the server. Call this off the main
+    /// thread while the app defers termination.
+    public static func terminateAllBlocking(grace: TimeInterval = 0.6, timeout: TimeInterval = 3.0) {
+        registryLock.lock(); let all = live.compactMap { $0.s }; registryLock.unlock()
+
+        // Phase 1: ask every session to log out, all in parallel.
+        let targets = all.compactMap { session in
+            session.beginShutdown().map { (session, $0) }
+        }
+        guard !targets.isEmpty else { return }
+
+        // Phase 2: let the remote shells act on the logout.
+        Thread.sleep(forTimeInterval: grace)
+
+        // Phase 3: close the PTYs and signal the process groups.
+        for (session, target) in targets {
+            session.closeMaster()
+            signalGroup(target, SIGHUP, SIGTERM)
+        }
+
+        // Phase 4: wait for the groups to disappear, then force-kill
+        // whatever is left.
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline, targets.contains(where: { isAlive($0.1) }) {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        for (_, target) in targets where isAlive(target) {
+            signalGroup(target, SIGKILL)
+        }
+    }
+
+    // MARK: - Shutdown helpers
+
+    private struct ShutdownTarget {
+        let pid: pid_t
+        let pgid: pid_t
+    }
+
+    private var isRunning: Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return running
+    }
+
+    /// Marks the session as stopping and asks the remote shell to log
+    /// out. Returns nil if the session was not running.
+    private func beginShutdown() -> ShutdownTarget? {
         stateLock.lock()
         let wasRunning = running
         running = false
         let group = pid
         stateLock.unlock()
 
-        guard wasRunning, group > 0 else { return }
+        guard wasRunning, group > 0 else { return nil }
 
         // Resolve the child's real process group rather than assuming
         // pid == pgid: that only holds if the new-session flag took
         // effect. We signal the group so gcloud AND its child ssh /
-        // tunnel processes are terminated, which closes the remote
-        // session instead of leaving it dangling.
+        // tunnel processes are terminated.
         let pgid = getpgid(group)
 
-        // 1. Log out gracefully first. Killing the local ssh process
-        //    does NOT immediately end the remote session: sshd keeps the
-        //    shell alive until it notices the dropped TCP connection,
-        //    which can take minutes. Sending "exit" makes the remote
-        //    shell terminate, so sshd reaps the session right away.
+        // Log out gracefully first. Killing the local ssh process does
+        // NOT immediately end the remote session: sshd keeps the shell
+        // alive until it notices the dropped TCP connection, which can
+        // take minutes. Sending "exit" makes the remote shell terminate
+        // so sshd reaps the session right away.
         let fd = masterFD
         if fd >= 0 {
             let logout = "\u{03}\rexit\r"   // Ctrl-C to clear any input, then exit
@@ -160,28 +241,29 @@ public final class PTYSession: @unchecked Sendable {
                 _ = write(fd, ptr, strlen(ptr))
             }
         }
+        return ShutdownTarget(pid: group, pgid: pgid)
+    }
 
-        // 2. Give the remote side a moment to act on the logout, then
-        //    tear everything down locally.
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.6) { [weak self] in
-            self?.source?.cancel()
-            if let self, self.masterFD >= 0 {
-                close(self.masterFD)
-                self.masterFD = -1
-            }
-            // Signal the group (and the child directly as a fallback).
-            if pgid > 0 {
-                kill(-pgid, SIGHUP)
-                kill(-pgid, SIGTERM)
-            }
-            kill(group, SIGHUP)
-            kill(group, SIGTERM)
-
-            DispatchQueue.global().asyncAfter(deadline: .now() + 2.0) {
-                if pgid > 0 { kill(-pgid, SIGKILL) }
-                kill(group, SIGKILL)
-            }
+    private func closeMaster() {
+        source?.cancel()
+        if masterFD >= 0 {
+            close(masterFD)
+            masterFD = -1
         }
+    }
+
+    /// Signals the whole process group, and the child directly as a
+    /// fallback.
+    private static func signalGroup(_ target: ShutdownTarget, _ signals: Int32...) {
+        for sig in signals {
+            if target.pgid > 0 { kill(-target.pgid, sig) }
+            kill(target.pid, sig)
+        }
+    }
+
+    private static func isAlive(_ target: ShutdownTarget) -> Bool {
+        if target.pgid > 0, kill(-target.pgid, 0) == 0 { return true }
+        return kill(target.pid, 0) == 0
     }
 
     // MARK: - Private

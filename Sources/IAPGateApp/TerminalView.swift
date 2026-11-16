@@ -98,7 +98,44 @@ final class KeyCapturingTextView: NSTextView {
 
     override var acceptsFirstResponder: Bool { true }
 
+    // MARK: - Paste
+
+    /// Pastes the clipboard into the PTY. The view is read-only, so
+    /// AppKit would otherwise disable Paste and Cmd+V would reach
+    /// keyDown as a literal "v".
+    override func paste(_ sender: Any?) {
+        guard let text = NSPasteboard.general.string(forType: .string),
+              !text.isEmpty else { return }
+        // Terminals expect CR for line breaks.
+        let normalized = text
+            .replacingOccurrences(of: "\r\n", with: "\r")
+            .replacingOccurrences(of: "\n", with: "\r")
+        onKey?(normalized)
+    }
+
+    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(paste(_:)) {
+            return NSPasteboard.general.string(forType: .string) != nil
+        }
+        return super.validateUserInterfaceItem(item)
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if flags == .command, event.charactersIgnoringModifiers == "v" {
+            paste(nil)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
     override func keyDown(with event: NSEvent) {
+        // Command shortcuts (copy, select all...) belong to the menu;
+        // never type them into the remote shell as letters.
+        if event.modifierFlags.contains(.command) {
+            super.keyDown(with: event)
+            return
+        }
         // Map special keys; otherwise send the characters.
         switch event.keyCode {
         // Real terminals send CR for Return; the TTY line discipline

@@ -14,7 +14,8 @@ let suites: [TestSuite] = [
     iapFrameSuite(),
     terminalEmulatorSuite(),
     connectionManagerSuite(),
-    windowsCredentialsSuite()
+    windowsCredentialsSuite(),
+    ptySessionSuite()
 ]
 
 let code = await TestRunner.run(suites)
